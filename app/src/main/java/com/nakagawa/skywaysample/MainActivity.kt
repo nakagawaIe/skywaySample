@@ -2,19 +2,17 @@ package com.nakagawa.skywaysample
 
 import android.Manifest
 import android.app.Activity
-import android.content.Context
 import android.content.pm.PackageManager
 import android.media.AudioManager
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.text.TextUtils
 import android.util.Log
 import android.view.View
 import android.view.Window
 import android.view.WindowManager
-import android.widget.Button
-import android.widget.TextView
-import android.widget.Toast
+import android.widget.*
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import io.skyway.Peer.*
@@ -22,15 +20,19 @@ import io.skyway.Peer.Browser.Canvas
 import io.skyway.Peer.Browser.MediaConstraints
 import io.skyway.Peer.Browser.MediaStream
 import io.skyway.Peer.Browser.Navigator
-import org.json.JSONArray
-import java.util.*
 
 
+/**
+ *
+ * MainActivity.java
+ * ECL WebRTC mesh video-chat sample
+ *
+ */
 class MainActivity : Activity() {
     private var _peer: Peer? = null
     private var _localStream: MediaStream? = null
-    private var _remoteStream: MediaStream? = null
-    private var _mediaConnection: MediaConnection? = null
+    private var _room: Room? = null
+    private var _adapter: RemoteViewAdapter? = null
     private var _strOwnId: String? = null
     private var _bConnected = false
     private var _handler: Handler? = null
@@ -83,47 +85,35 @@ class MainActivity : Activity() {
                 startLocalStream()
             }
         }
-
-        // CALL (Incoming call)
-        _peer!!.on(Peer.PeerEventEnum.CALL, OnCallback { `object` ->
-            if (`object` !is MediaConnection) {
-                return@OnCallback
-            }
-            _mediaConnection = `object`
-            setMediaCallbacks()
-            _mediaConnection!!.answer(_localStream)
-            _bConnected = true
-            updateActionButtonTitle()
-        })
-
         _peer!!.on(Peer.PeerEventEnum.CLOSE) { Log.d(TAG, "[On/Close]") }
-
-        _peer!!.on(Peer.PeerEventEnum.DISCONNECTED) { Log.d(TAG, "[On/Disconnected]") }
-
+        _peer!!.on(
+            Peer.PeerEventEnum.DISCONNECTED
+        ) { Log.d(TAG, "[On/Disconnected]") }
         _peer!!.on(Peer.PeerEventEnum.ERROR) { `object` ->
             val error = `object` as PeerError
-//            Log.d(TAG, "[On/Error]" + error.message)
-            Log.d(TAG, "[On/Error] $error")
+            Log.d(TAG, "[On/Error]")
         }
+
 
         //
         // Set GUI event listeners
         //
-        val btnAction = findViewById<View>(R.id.btnAction) as Button
+        val btnAction =
+            findViewById<View>(R.id.btnAction) as Button
         btnAction.isEnabled = true
         btnAction.setOnClickListener { v ->
             v.isEnabled = false
             if (!_bConnected) {
-                // Select remote peer & make a call
-                showPeerIDs()
+                // Join room
+                joinRoom()
             } else {
-                // Hang up a call
-                closeRemoteStream()
-                _mediaConnection!!.close()
+                // Leave room
+                leaveRoom()
             }
             v.isEnabled = true
         }
-        val switchCameraAction = findViewById<View>(R.id.switchCameraAction) as Button
+        val switchCameraAction =
+            findViewById<View>(R.id.switchCameraAction) as Button
         switchCameraAction.setOnClickListener {
             if (null != _localStream) {
                 val result = _localStream!!.switchCamera()
@@ -133,6 +123,15 @@ class MainActivity : Activity() {
                     //Failed
                 }
             }
+        }
+
+        //
+        // Set GridView for Remote Video Stream
+        //
+        val grdRemote = findViewById<View>(R.id.grdRemote) as GridView
+        if (null != grdRemote) {
+            _adapter = RemoteViewAdapter(this)
+            grdRemote.adapter = _adapter
         }
     }
 
@@ -196,47 +195,24 @@ class MainActivity : Activity() {
     //
     fun startLocalStream() {
         Navigator.initialize(_peer)
-        val constraints = MediaConstraints()
+        val constraints =
+            MediaConstraints()
         _localStream = Navigator.getUserMedia(constraints)
-        val canvas = findViewById<View>(R.id.svLocalView) as Canvas
+        val canvas =
+            findViewById<View>(R.id.svLocalView) as Canvas
         _localStream!!.addVideoRenderer(canvas, 0)
-    }
-
-    //
-    // Set callbacks for MediaConnection.MediaEvents
-    //
-    fun setMediaCallbacks() {
-        _mediaConnection!!.on(MediaConnection.MediaEventEnum.STREAM) { `object` ->
-            _remoteStream = `object` as MediaStream
-            val canvas = findViewById<View>(R.id.svRemoteView) as Canvas
-            _remoteStream?.addVideoRenderer(canvas, 0)
-        }
-        _mediaConnection!!.on(MediaConnection.MediaEventEnum.CLOSE) {
-            closeRemoteStream()
-            _bConnected = false
-            updateActionButtonTitle()
-        }
-        _mediaConnection!!.on(MediaConnection.MediaEventEnum.ERROR) { `object` ->
-            val error = `object` as PeerError
-            Log.d(TAG, "[On/MediaError]$error")
-        }
     }
 
     //
     // Clean up objects
     //
     private fun destroyPeer() {
-        closeRemoteStream()
+        leaveRoom()
         if (null != _localStream) {
-            val canvas = findViewById<View>(R.id.svLocalView) as Canvas
+            val canvas =
+                findViewById<View>(R.id.svLocalView) as Canvas
             _localStream!!.removeVideoRenderer(canvas, 0)
             _localStream!!.close()
-        }
-        if (null != _mediaConnection) {
-            if (_mediaConnection!!.isOpen) {
-                _mediaConnection!!.close()
-            }
-            unsetMediaCallbacks()
         }
         Navigator.terminate()
         if (null != _peer) {
@@ -254,7 +230,7 @@ class MainActivity : Activity() {
     //
     // Unset callbacks for PeerEvents
     //
-    private fun unsetPeerCallback(peer: Peer) {
+    fun unsetPeerCallback(peer: Peer) {
         if (null == _peer) {
             return
         }
@@ -267,113 +243,134 @@ class MainActivity : Activity() {
     }
 
     //
-    // Unset callbacks for MediaConnection.MediaEvents
+    // Join the room
     //
-    private fun unsetMediaCallbacks() {
-        if (null == _mediaConnection) {
-            return
-        }
-        _mediaConnection!!.on(MediaConnection.MediaEventEnum.STREAM, null)
-        _mediaConnection!!.on(MediaConnection.MediaEventEnum.CLOSE, null)
-        _mediaConnection!!.on(MediaConnection.MediaEventEnum.ERROR, null)
-    }
-
-    //
-    // Close a remote MediaStream
-    //
-    private fun closeRemoteStream() {
-        if (null == _remoteStream) {
-            return
-        }
-        val canvas =
-            findViewById<View>(R.id.svRemoteView) as Canvas
-        _remoteStream?.removeVideoRenderer(canvas, 0)
-        _remoteStream?.close()
-    }
-
-    //
-    // Create a MediaConnection
-    //
-    fun onPeerSelected(strPeerId: String?) {
-        if (null == _peer) {
-            return
-        }
-        if (null != _mediaConnection) {
-            _mediaConnection!!.close()
-        }
-        val option = CallOption()
-        _mediaConnection = _peer!!.call(strPeerId, _localStream, option)
-        if (null != _mediaConnection) {
-            setMediaCallbacks()
-            _bConnected = true
-        }
-        updateActionButtonTitle()
-    }
-
-    //
-    // Listing all peers
-    //
-    private fun showPeerIDs() {
-        if (null == _peer || null == _strOwnId || _strOwnId!!.isEmpty()) {
+    fun joinRoom() {
+        if (null == _peer || null == _strOwnId || 0 == _strOwnId!!.length) {
             Toast.makeText(this, "Your PeerID is null or invalid.", Toast.LENGTH_SHORT).show()
             return
         }
 
-        // Get all IDs connected to the server
-        val fContext: Context = this
-        _peer!!.listAllPeers(OnCallback { `object` ->
-            if (`object` !is JSONArray) {
-                return@OnCallback
-            }
-            val listPeerIds = ArrayList<String>()
-            var peerId: String
+        // Get room name
+        val edtRoomName = findViewById<View>(R.id.txRoomName) as EditText
+        val roomName = edtRoomName.text.toString()
+        if (TextUtils.isEmpty(roomName)) {
+            Toast.makeText(this, "You should input room name.", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val option = RoomOption()
+        option.mode = RoomOption.RoomModeEnum.MESH
+        option.stream = _localStream
 
-            // Exclude my own ID
-            var i = 0
-            while (`object`.length() > i) {
-                try {
-                    peerId = `object`.getString(i)
-                    if (_strOwnId != peerId) {
-                        listPeerIds.add(peerId)
-                    }
-                } catch (e: Exception) {
-                    e.printStackTrace()
-                }
-                i++
-            }
+        // Join Room
+        _room = _peer!!.joinRoom(roomName, option)
+        _bConnected = true
 
-            // Show IDs using DialogFragment
-            if (0 < listPeerIds.size) {
-                val mgr = fragmentManager
-                val dialog = PeerListDialogFragment()
-                dialog.setListener(
-                    object : PeerListDialogFragment.PeerListDialogFragmentListener {
-                        override fun onItemClick(item: String?) {
-                            _handler!!.post { onPeerSelected(item) }
-                        }
-                    })
-                dialog.setItems(listPeerIds)
-                dialog.show(mgr, "peerlist")
-            } else {
-                Toast.makeText(
-                    fContext,
-                    "PeerID list (other than your ID) is empty.",
-                    Toast.LENGTH_LONG
-                ).show()
-            }
+        //
+        // Set Callbacks
+        //
+        _room!!.on(Room.RoomEventEnum.OPEN, OnCallback { `object` ->
+            if (`object` !is String) return@OnCallback
+            val roomName = `object`
+            Log.i(TAG, "Enter Room: $roomName")
+            Toast.makeText(this@MainActivity, "Enter Room: $roomName", Toast.LENGTH_SHORT)
+                .show()
         })
+        _room!!.on(Room.RoomEventEnum.CLOSE, OnCallback { `object` ->
+            val roomName = `object` as String
+            Log.i(TAG, "Leave Room: $roomName")
+            Toast.makeText(this@MainActivity, "Leave Room: $roomName", Toast.LENGTH_LONG)
+                .show()
+
+            // Remove all streams
+            _adapter?.removeAllRenderers()
+
+            // Unset callbacks
+            _room!!.on(Room.RoomEventEnum.OPEN, null)
+            _room!!.on(Room.RoomEventEnum.CLOSE, null)
+            _room!!.on(Room.RoomEventEnum.ERROR, null)
+            _room!!.on(Room.RoomEventEnum.PEER_JOIN, null)
+            _room!!.on(Room.RoomEventEnum.PEER_LEAVE, null)
+            _room!!.on(Room.RoomEventEnum.STREAM, null)
+            _room!!.on(Room.RoomEventEnum.REMOVE_STREAM, null)
+            _room = null
+            _bConnected = false
+            updateActionButtonTitle()
+        })
+        _room!!.on(Room.RoomEventEnum.ERROR, OnCallback { `object` ->
+            val error = `object` as PeerError
+            Log.d(TAG, "RoomEventEnum.ERROR:$error")
+        })
+        _room!!.on(Room.RoomEventEnum.PEER_JOIN, OnCallback { `object` ->
+            Log.d(TAG, "RoomEventEnum.PEER_JOIN:")
+            if (`object` !is String) return@OnCallback
+            Log.i(TAG, "Join Room: $`object`")
+            Toast.makeText(this@MainActivity, "$`object` has joined.", Toast.LENGTH_LONG).show()
+        })
+        _room!!.on(Room.RoomEventEnum.PEER_LEAVE, OnCallback { `object` ->
+            Log.d(TAG, "RoomEventEnum.PEER_LEAVE:")
+            if (`object` !is String) return@OnCallback
+            val peerId = `object`
+            Log.i(TAG, "Leave Room: $peerId")
+            Toast.makeText(this@MainActivity, "$peerId has left.", Toast.LENGTH_LONG).show()
+            _adapter?.remove(peerId)
+        })
+        _room!!.on(Room.RoomEventEnum.STREAM, OnCallback { `object` ->
+            Log.d(
+                TAG,
+                "RoomEventEnum.STREAM: + $`object`"
+            )
+            if (`object` !is MediaStream) return@OnCallback
+            val stream =
+                `object`
+            Log.d(
+                TAG,
+                "peer = " + stream.peerId + ", label = " + stream.label
+            )
+            _adapter?.add(stream)
+        })
+        _room!!.on(Room.RoomEventEnum.REMOVE_STREAM, OnCallback { `object` ->
+            Log.d(
+                TAG,
+                "RoomEventEnum.REMOVE_STREAM: $`object`"
+            )
+            if (`object` !is MediaStream) return@OnCallback
+            val stream =
+                `object`
+            Log.d(
+                TAG,
+                "peer = " + stream.peerId + ", label = " + stream.label
+            )
+            _adapter?.remove(stream)
+        })
+
+        // Update UI
+        updateActionButtonTitle()
+    }
+
+    //
+    // Leave the room
+    //
+    fun leaveRoom() {
+        if (null == _peer || null == _room) {
+            return
+        }
+        _room!!.close()
     }
 
     //
     // Update actionButton title
     //
-    private fun updateActionButtonTitle() {
+    fun updateActionButtonTitle() {
         _handler!!.post {
-            val btnAction = findViewById<View>(R.id.btnAction) as Button
-            if (!_bConnected) {
-                btnAction.text = "Make Call"
-            } else {
-                btnAction.text = "Hang up"
+            val btnAction =
+                findViewById<View>(R.id.btnAction) as Button
+            if (null != btnAction) {
+                if (!_bConnected) {
+                    btnAction.text = "Join Room"
+                } else {
+                    btnAction.text = "Leave Room"
+                }
             }
         }
     }
